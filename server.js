@@ -33,7 +33,7 @@ async function lbFetch() {
 
 // ── Game constants ─────────────────────────────────────────────────────────────
 const PLAYER_COLORS = ['#FF4757','#1E90FF','#2ED573','#FFA502','#A29BFE','#FF6B81','#00D2D3','#ECCC68'];
-const VALID_GAMES   = ['kites', 'trivia', 'drawing'];
+const VALID_GAMES   = ['kites', 'trivia', 'drawing', 'buzzer'];
 const DRAWING_WORDS = [
   // Animals
   'cat','dog','fish','bird','lion','tiger','bear','wolf','fox','deer',
@@ -209,6 +209,9 @@ io.on('connection', (socket) => {
       };
       room.players.forEach(p => { room.drawing.scores[p.playerId] = 0; });
       setTimeout(() => startDrawingRound(roomCode), 1200);
+    } else if (room.activeGame === 'buzzer') {
+      room.buzzer = { locked: false, currentWinner: null, scores: {} };
+      room.players.forEach(p => { room.buzzer.scores[p.playerId] = 0; });
     }
   });
 
@@ -342,12 +345,67 @@ io.on('connection', (socket) => {
     if (t) t.emit('player-eliminated');
   });
 
+  // Buzzer events
+  socket.on('buzzer-press', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'playing' || room.activeGame !== 'buzzer' || !room.buzzer) return;
+    if (!room.buzzer.locked) {
+      room.buzzer.locked = true;
+      room.buzzer.currentWinner = { id: socket.data.playerId, name: socket.data.playerLabel, color: socket.data.playerColor };
+      io.to(room.screenSocketId).emit('buzzer-locked', { winnerName: socket.data.playerLabel, winnerId: socket.data.playerId, color: socket.data.playerColor });
+      emitToControllers(room, 'buzzer-locked', { winnerName: socket.data.playerLabel, winnerId: socket.data.playerId, color: socket.data.playerColor });
+    }
+  });
+
+  socket.on('buzzer-judge', ({ roomCode, correct }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'playing' || room.activeGame !== 'buzzer' || !room.buzzer) return;
+    if (socket.data.playerId !== room.hostPlayerId) return;
+    if (!room.buzzer.locked || !room.buzzer.currentWinner) return;
+
+    const winnerId = room.buzzer.currentWinner.id;
+    if (correct) {
+      room.buzzer.scores[winnerId] = (room.buzzer.scores[winnerId] || 0) + 100;
+    } else {
+      room.buzzer.scores[winnerId] = (room.buzzer.scores[winnerId] || 0) - 50;
+    }
+
+    const { currentWinner } = room.buzzer;
+    room.buzzer.locked = false;
+    room.buzzer.currentWinner = null;
+    io.to(room.screenSocketId).emit('buzzer-judged', { correct, scores: room.buzzer.scores, prevWinner: currentWinner });
+    emitToControllers(room, 'buzzer-unlocked', { scores: room.buzzer.scores });
+  });
+
+  socket.on('buzzer-end-game', async ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'playing' || room.activeGame !== 'buzzer' || !room.buzzer) return;
+    if (socket.data.playerId !== room.hostPlayerId) return;
+
+    const scores = room.buzzer.scores;
+    const sorted = Object.entries(scores).sort(([,a],[,b]) => b - a);
+    if (sorted.length > 0) {
+      const [winnerId, winnerScore] = sorted[0];
+      const winnerPlayer = room.players.find(p => p.playerId === winnerId);
+      if (winnerPlayer && winnerScore > 0) {
+        await lbInsert(winnerPlayer.label, winnerScore, 'buzzer');
+      }
+    }
+    room.gameState = 'lobby';
+    emitToControllers(room, 'game-reset', { hostPlayerId: room.hostPlayerId });
+    io.to(room.screenSocketId).emit('buzzer-ended', { scores });
+    // update screen leaderboard
+    const entries = await lbFetch();
+    io.to(room.screenSocketId).emit('leaderboard-data', { entries });
+  });
+
   // Lobby reset
   socket.on('game-reset', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
     if (room.drawing?.roundTimer) clearTimeout(room.drawing.roundTimer);
     room.drawing   = null;
+    room.buzzer    = null;
     room.gameState = 'lobby';
     console.log(`[game-reset] Room ${roomCode} → LOBBY`);
     emitToControllers(room, 'game-reset', { hostPlayerId: room.hostPlayerId });
