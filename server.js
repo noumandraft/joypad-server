@@ -14,16 +14,21 @@ const supabase = createClient(
   'sb_publishable_OdNHuCSwKeIEJRnzEAB4aQ_mwg1WpS6'
 );
 async function lbInsert(playerName, score, game) {
-  const { error } = await supabase.from('leaderboard').insert({ player_name: playerName, score, game });
+  const { error } = await supabase.from('leaderboard').insert({ player_name: playerName, score, game_played: game });
   if (error) console.error('[supabase] insert:', error.message);
   else console.log(`[supabase] saved ${playerName} ${score}pts (${game})`);
 }
 async function lbFetch() {
   const { data, error } = await supabase.from('leaderboard')
-    .select('player_name,score,game,created_at')
+    .select('player_name,score,game_played,created_at')
     .order('score', { ascending: false }).limit(10);
   if (error) { console.error('[supabase] fetch:', error.message); return []; }
-  return data || [];
+  return (data || []).map(row => ({
+    player_name: row.player_name,
+    score: row.score,
+    game: row.game_played,
+    created_at: row.created_at
+  }));
 }
 
 // ── Game constants ─────────────────────────────────────────────────────────────
