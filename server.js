@@ -192,13 +192,13 @@ io.on('connection', (socket) => {
     emitToControllers(room, 'game-selected', { activeGame: game });
   });
 
-  socket.on('start-match', ({ roomCode }) => {
+  socket.on('start-match', ({ roomCode, category, difficulty }) => {
     const room = rooms[roomCode];
     if (!room || socket.data.playerId !== room.hostPlayerId) return;
     if (room.gameState === 'playing') return;
     room.gameState = 'playing';
     console.log(`[start-match] Room ${roomCode} playing ${room.activeGame}`);
-    io.to(room.screenSocketId).emit('match-started');
+    io.to(room.screenSocketId).emit('match-started', { category, difficulty });
     emitToControllers(room, 'match-started', {});
     if (room.activeGame === 'drawing') {
       const shuffled = [...room.players.map(p => p.playerId)].sort(() => Math.random() - 0.5);
