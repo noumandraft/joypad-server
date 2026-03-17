@@ -1,23 +1,60 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
 const PORT = process.env.PORT || 3000;
 
+// ── Supabase ───────────────────────────────────────────────────────────────────
+const supabase = createClient(
+  'https://rclfgcnruidkijebxalf.supabase.co',
+  'sb_publishable_OdNHuCSwKeIEJRnzEAB4aQ_mwg1WpS6'
+);
+async function lbInsert(playerName, score, game) {
+  const { error } = await supabase.from('leaderboard').insert({ player_name: playerName, score, game });
+  if (error) console.error('[supabase] insert:', error.message);
+  else console.log(`[supabase] saved ${playerName} ${score}pts (${game})`);
+}
+async function lbFetch() {
+  const { data, error } = await supabase.from('leaderboard')
+    .select('player_name,score,game,created_at')
+    .order('score', { ascending: false }).limit(10);
+  if (error) { console.error('[supabase] fetch:', error.message); return []; }
+  return data || [];
+}
+
+// ── Game constants ─────────────────────────────────────────────────────────────
 const PLAYER_COLORS = ['#FF4757','#1E90FF','#2ED573','#FFA502','#A29BFE','#FF6B81','#00D2D3','#ECCC68'];
 const VALID_GAMES   = ['kites', 'trivia', 'drawing'];
 const DRAWING_WORDS = [
-  'apple','cat','house','tree','car','sun','fish','boat','pizza','snake',
-  'crown','clock','cloud','bridge','guitar','elephant','robot','umbrella',
-  'rocket','coffee','castle','butterfly','dragon','rainbow','volcano',
+  // Animals
+  'cat','dog','fish','bird','lion','tiger','bear','wolf','fox','deer',
+  'horse','rabbit','monkey','elephant','giraffe','penguin','dolphin','shark','owl','eagle',
+  'crocodile','parrot','kangaroo','panda','zebra','octopus','flamingo','jellyfish','crab','turtle',
+  // Food & Drink
+  'pizza','apple','banana','cake','bread','coffee','cookie','burger','taco','sushi',
+  'ice cream','sandwich','strawberry','watermelon','lemon','pineapple','donut','waffle','egg','cheese',
+  'chocolate','popcorn','hotdog','grapes','carrot','mushroom','avocado','pancake','noodles','mango',
+  // Objects & Places
+  'house','car','boat','rocket','airplane','train','bicycle','umbrella','guitar','crown',
+  'clock','phone','book','lamp','chair','table','door','window','bridge','ladder',
+  'castle','lighthouse','igloo','windmill','tent','fire hydrant','mailbox','telescope','anchor','compass',
+  // Nature
+  'sun','moon','star','cloud','rain','snow','tree','flower','mountain','volcano',
+  'river','ocean','island','forest','desert','cave','rainbow','lightning','wave','cactus',
+  // Activities & Characters
+  'robot','alien','ghost','dragon','wizard','knight','ninja','cowboy','pirate','mermaid',
+  'swimming','dancing','sleeping','cooking','painting','fishing','skiing','surfing','skateboard','parachute',
+  // Misc
+  'balloon','kite','candle','mirror','key','bell','lantern','hourglass','magnet','trophy',
 ];
-const ROUND_TIME    = 60; // seconds per drawing round
+const ROUND_TIME = 60;
 const rooms = {};
 
-app.get('/', (req, res) => res.send('AirConsole backend is running ✅'));
+app.get('/', (req, res) => res.send('Joypad backend is running ✅'));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function broadcastPlayerList(room) {
@@ -54,58 +91,56 @@ function startDrawingRound(roomCode) {
   if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
   const dg = room.drawing;
 
-  if (dg.artistIndex >= dg.artistQueue.length) {
-    endDrawingGame(roomCode); return;
-  }
+  if (dg.artistIndex >= dg.artistQueue.length) { endDrawingGame(roomCode); return; }
 
   dg.currentArtistId = dg.artistQueue[dg.artistIndex++];
   dg.currentWord     = DRAWING_WORDS[Math.floor(Math.random() * DRAWING_WORDS.length)].toLowerCase();
   dg.roundStartTime  = Date.now();
 
-  const artist = room.players.find(p => p.playerId === dg.currentArtistId);
+  const artist      = room.players.find(p => p.playerId === dg.currentArtistId);
   const artistName  = artist?.label || 'Someone';
   const artistColor = artist?.color || '#fff';
 
-  console.log(`[drawing] Round ${dg.artistIndex}/${dg.artistQueue.length} — Artist: ${artistName} Word: ${dg.currentWord}`);
+  console.log(`[drawing] Round ${dg.artistIndex}/${dg.artistQueue.length} — Artist:${artistName} Word:${dg.currentWord}`);
 
-  // Tell the TV screen
   io.to(room.screenSocketId).emit('drawing-round-start', {
     artistId: dg.currentArtistId, artistName, artistColor,
     roundIndex: dg.artistIndex, totalRounds: dg.artistQueue.length,
     timeLimit: ROUND_TIME, wordLength: dg.currentWord.length,
   });
 
-  // Tell each controller their role
   room.players.forEach(({ socketId, playerId }) => {
-    const s = io.sockets.sockets.get(socketId);
-    if (!s) return;
-    if (playerId === dg.currentArtistId) {
+    const s = io.sockets.sockets.get(socketId); if (!s) return;
+    if (playerId === dg.currentArtistId)
       s.emit('drawing-role', { role: 'artist', word: dg.currentWord, artistName, artistColor });
-    } else {
+    else
       s.emit('drawing-role', { role: 'guesser', artistName, artistColor });
-    }
   });
 
-  // Authoritative round timer
   if (dg.roundTimer) clearTimeout(dg.roundTimer);
   dg.roundTimer = setTimeout(() => {
     const r2 = rooms[roomCode];
-    if (!r2 || r2.drawing?.currentWord !== dg.currentWord) return; // already resolved
-    const word = dg.currentWord;
-    dg.currentWord = null;
+    if (!r2 || r2.drawing?.currentWord !== dg.currentWord) return;
+    const word = dg.currentWord; dg.currentWord = null;
     io.to(r2.screenSocketId).emit('drawing-round-timeout', { word, artistName });
     emitToControllers(r2, 'drawing-round-timeout', { word });
     setTimeout(() => startDrawingRound(roomCode), 4000);
   }, ROUND_TIME * 1000);
 }
 
-function endDrawingGame(roomCode) {
+async function endDrawingGame(roomCode) {
   const room = rooms[roomCode];
   if (!room) return;
   const scores = room.drawing?.scores || {};
-  console.log(`[drawing] Game over for room ${roomCode}`);
   io.to(room.screenSocketId).emit('drawing-game-end', { scores });
   emitToControllers(room, 'drawing-game-end', { scores });
+  // Save winner to leaderboard
+  const sorted = Object.entries(scores).sort(([,a],[,b]) => b - a);
+  if (sorted.length > 0) {
+    const [winnerId, winnerScore] = sorted[0];
+    const winnerPlayer = room.players.find(p => p.playerId === winnerId);
+    if (winnerPlayer && winnerScore > 0) await lbInsert(winnerPlayer.label, winnerScore, 'drawing');
+  }
 }
 
 // ── Socket logic ──────────────────────────────────────────────────────────────
@@ -133,7 +168,7 @@ io.on('connection', (socket) => {
 
     room.players.push({ socketId: socket.id, playerId, label: playerLabel, color: playerColor });
     socket.join(roomCode);
-    if (room.players.length === 1) { room.hostPlayerId = playerId; }
+    if (room.players.length === 1) room.hostPlayerId = playerId;
 
     socket.data.roomCode = roomCode; socket.data.playerId = playerId;
     socket.data.playerLabel = playerLabel; socket.data.playerColor = playerColor;
@@ -148,7 +183,6 @@ io.on('connection', (socket) => {
     if (!room || socket.data.playerId !== room.hostPlayerId) return;
     if (room.gameState === 'playing' || !VALID_GAMES.includes(game)) return;
     room.activeGame = game;
-    console.log(`[select-game] Room ${roomCode} → ${game}`);
     io.to(room.screenSocketId).emit('game-selected', { activeGame: game });
     emitToControllers(room, 'game-selected', { activeGame: game });
   });
@@ -161,7 +195,6 @@ io.on('connection', (socket) => {
     console.log(`[start-match] Room ${roomCode} playing ${room.activeGame}`);
     io.to(room.screenSocketId).emit('match-started');
     emitToControllers(room, 'match-started', {});
-    // Kick off drawing game loop
     if (room.activeGame === 'drawing') {
       const shuffled = [...room.players.map(p => p.playerId)].sort(() => Math.random() - 0.5);
       room.drawing = {
@@ -169,13 +202,12 @@ io.on('connection', (socket) => {
         currentArtistId: null, currentWord: null,
         scores: {}, roundTimer: null, roundStartTime: null,
       };
-      // Seed scores to 0 for all players
       room.players.forEach(p => { room.drawing.scores[p.playerId] = 0; });
-      setTimeout(() => startDrawingRound(roomCode), 1200); // let screen init first
+      setTimeout(() => startDrawingRound(roomCode), 1200);
     }
   });
 
-  // Kites: controller → screen
+  // Kites relay
   socket.on('jump', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.gameState !== 'playing') return;
@@ -184,28 +216,43 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Drawing: only the current artist may emit drawing events
+  // Kites: screen reports winner for leaderboard
+  socket.on('report-winner', async ({ roomCode, game, winnerLabel, winnerScore }) => {
+    const room = rooms[roomCode];
+    if (!room || socket.id !== room.screenSocketId) return;
+    if (typeof winnerScore !== 'number' || winnerScore <= 0) return;
+    await lbInsert(String(winnerLabel).slice(0, 40), Math.round(winnerScore), String(game));
+    // Refresh leaderboard on screen after save
+    const entries = await lbFetch();
+    io.to(room.screenSocketId).emit('leaderboard-data', { entries });
+  });
+
+  // Leaderboard request (host controller or screen)
+  socket.on('request-leaderboard', async ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const entries = await lbFetch();
+    io.to(room.screenSocketId).emit('leaderboard-data', { entries });
+  });
+
+  // Drawing relay — artist-only
   socket.on('draw-start', ({ roomCode, x, y }) => {
     const room = rooms[roomCode];
     if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
-    if (socket.data.playerId !== room.drawing?.currentArtistId) return; // ← security
-    const nx = Math.max(0, Math.min(1, Number(x) || 0));
-    const ny = Math.max(0, Math.min(1, Number(y) || 0));
+    if (socket.data.playerId !== room.drawing?.currentArtistId) return;
+    const nx = Math.max(0, Math.min(1, Number(x)||0)), ny = Math.max(0, Math.min(1, Number(y)||0));
     io.to(room.screenSocketId).emit('draw-start', {
       playerId: socket.data.playerId, label: socket.data.playerLabel,
       color: socket.data.playerColor, x: nx, y: ny,
     });
   });
-
   socket.on('draw-move', ({ roomCode, x, y }) => {
     const room = rooms[roomCode];
     if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
     if (socket.data.playerId !== room.drawing?.currentArtistId) return;
-    const nx = Math.max(0, Math.min(1, Number(x) || 0));
-    const ny = Math.max(0, Math.min(1, Number(y) || 0));
+    const nx = Math.max(0, Math.min(1, Number(x)||0)), ny = Math.max(0, Math.min(1, Number(y)||0));
     io.to(room.screenSocketId).emit('draw-move', { playerId: socket.data.playerId, x: nx, y: ny });
   });
-
   socket.on('draw-end', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
@@ -213,27 +260,23 @@ io.on('connection', (socket) => {
     io.to(room.screenSocketId).emit('draw-end', { playerId: socket.data.playerId });
   });
 
-  // Drawing: guesses from non-artist controllers
+  // Drawing guess
   socket.on('drawing-guess', ({ roomCode, guess }) => {
     const room = rooms[roomCode];
     if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
     const dg = room.drawing;
     if (!dg?.currentWord || !dg.currentArtistId) return;
-    if (socket.data.playerId === dg.currentArtistId) return; // artist can't guess
-
+    if (socket.data.playerId === dg.currentArtistId) return;
     const safe = (typeof guess === 'string') ? guess.trim().replace(/[<>&"']/g, '').slice(0, 40) : '';
     if (!safe) return;
-
     if (safe.toLowerCase() === dg.currentWord) {
-      // ── Correct! ──
       clearTimeout(dg.roundTimer);
-      const word = dg.currentWord; dg.currentWord = null; // lock against double-win
+      const word = dg.currentWord; dg.currentWord = null;
       dg.scores[socket.data.playerId]  = (dg.scores[socket.data.playerId]  || 0) + 100;
       dg.scores[dg.currentArtistId]    = (dg.scores[dg.currentArtistId]    || 0) + 50;
       const timeMs = dg.roundStartTime ? Date.now() - dg.roundStartTime : 0;
       io.to(room.screenSocketId).emit('drawing-round-win', {
-        word,
-        winner: { playerId: socket.data.playerId, label: socket.data.playerLabel, color: socket.data.playerColor },
+        word, winner: { playerId: socket.data.playerId, label: socket.data.playerLabel, color: socket.data.playerColor },
         artistId: dg.currentArtistId, scores: { ...dg.scores }, timeMs,
       });
       emitToControllers(room, 'drawing-round-win', {
@@ -242,10 +285,10 @@ io.on('connection', (socket) => {
       });
       setTimeout(() => startDrawingRound(roomCode), 5000);
     } else {
-      // ── Wrong — broadcast as guess feed ──
+      const safeGuess = safe.slice(0, 30);
       io.to(room.screenSocketId).emit('drawing-guess-feed', {
         playerId: socket.data.playerId, label: socket.data.playerLabel,
-        color: socket.data.playerColor, guess: safe,
+        color: socket.data.playerColor, guess: safeGuess,
       });
     }
   });
@@ -269,13 +312,24 @@ io.on('connection', (socket) => {
     if (!room || socket.id !== room.screenSocketId) return;
     emitToControllers(room, 'trivia-result', { correctIndex, scores, answers });
   });
-  socket.on('trivia-final', ({ roomCode, finalScores }) => {
+  socket.on('trivia-final', async ({ roomCode, finalScores }) => {
     const room = rooms[roomCode];
     if (!room || socket.id !== room.screenSocketId) return;
     emitToControllers(room, 'trivia-final', { finalScores });
+    // Save trivia winner to leaderboard
+    const sorted = Object.entries(finalScores).sort(([,a],[,b]) => b - a);
+    if (sorted.length > 0) {
+      const [winnerId, winnerScore] = sorted[0];
+      const winnerPlayer = room.players.find(p => p.playerId === winnerId);
+      if (winnerPlayer && winnerScore > 0) {
+        await lbInsert(winnerPlayer.label, winnerScore, 'trivia');
+        const entries = await lbFetch();
+        io.to(room.screenSocketId).emit('leaderboard-data', { entries });
+      }
+    }
   });
 
-  // Kites: screen relays elimination
+  // Kites elimination relay
   socket.on('player-eliminated', ({ roomCode, playerId }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -283,14 +337,14 @@ io.on('connection', (socket) => {
     if (t) t.emit('player-eliminated');
   });
 
-  // Any game: lobby reset
+  // Lobby reset
   socket.on('game-reset', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
     if (room.drawing?.roundTimer) clearTimeout(room.drawing.roundTimer);
-    room.drawing    = null;
-    room.gameState  = 'lobby';
-    console.log(`[game-reset] Room ${roomCode} back to LOBBY`);
+    room.drawing   = null;
+    room.gameState = 'lobby';
+    console.log(`[game-reset] Room ${roomCode} → LOBBY`);
     emitToControllers(room, 'game-reset', { hostPlayerId: room.hostPlayerId });
     broadcastPlayerList(room);
   });
@@ -317,4 +371,4 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
+server.listen(PORT, () => console.log(`Joypad server on http://localhost:${PORT}`));
