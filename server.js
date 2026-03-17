@@ -107,6 +107,34 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Drawing: controller → screen (relay with server-stamped metadata)
+  socket.on('draw-start', ({ roomCode, x, y, color }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
+    // Clamp normalised coords to [0,1] so a rogue client can't break rendering
+    const nx = Math.max(0, Math.min(1, Number(x) || 0));
+    const ny = Math.max(0, Math.min(1, Number(y) || 0));
+    io.to(room.screenSocketId).emit('draw-start', {
+      playerId: socket.data.playerId, label: socket.data.playerLabel,
+      color: socket.data.playerColor, x: nx, y: ny,
+    });
+  });
+
+  socket.on('draw-move', ({ roomCode, x, y }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
+    const nx = Math.max(0, Math.min(1, Number(x) || 0));
+    const ny = Math.max(0, Math.min(1, Number(y) || 0));
+    io.to(room.screenSocketId).emit('draw-move', { playerId: socket.data.playerId, x: nx, y: ny });
+  });
+
+  socket.on('draw-end', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room || room.gameState !== 'playing' || room.activeGame !== 'drawing') return;
+    io.to(room.screenSocketId).emit('draw-end', { playerId: socket.data.playerId });
+  });
+
+
   // Trivia: screen broadcasts question to all controllers
   socket.on('trivia-question', ({ roomCode, questionIndex, question, options, timeLimit }) => {
     const room = rooms[roomCode];
